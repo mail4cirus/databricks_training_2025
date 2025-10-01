@@ -1,0 +1,156 @@
+-- Databricks notebook source
+-- MAGIC %python
+-- MAGIC
+-- MAGIC dbutils.fs.rm("dbfs:/user/hive/warehouse/empnew/_delta_log/00000000000000000000.json",True)
+
+-- COMMAND ----------
+
+create table empn(id int, name string, dep string) using parquet
+
+-- COMMAND ----------
+
+desc extended empn
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC
+-- MAGIC ## Internals of Delta Lake
+-- MAGIC whenever a delta table is created we hvae below files
+-- MAGIC
+-- MAGIC parquet (Data files)
+-- MAGIC + 
+-- MAGIC _delta_logs  (few ppl call this only as metadata but databricks calls everthing including parquet as metadata)
+-- MAGIC   
+-- MAGIC   1.crc files(cyclic reducdant check)
+-- MAGIC       check file to check transcation status to check transcation has completed or not
+-- MAGIC       in any database or datawarehuse check file will create but json will not create 
+-- MAGIC       for every transcation new crc will create each time
+-- MAGIC   
+-- MAGIC   2.json
+-- MAGIC       consits of user operation details every time with key value pair
+-- MAGIC       for every transcation new json will create each time
+-- MAGIC       starts with 20 0'c
+-- MAGIC       because of this json file where all the operations has logged we will get ACID properties
+-- MAGIC       just in case if something happens/fails we will roll back with the what operations caused that using json files using below cmd. it will give in tabular format from all the json files
+-- MAGIC           Shows all the transcations happened previously 
+-- MAGIC           desc history table_name
+-- MAGIC
+-- MAGIC           Below commands are extra
+-- MAGIC           shows who created the table and datalocation also  how many files present undeer the location
+-- MAGIC           desc detail table_name
+-- MAGIC
+-- MAGIC           gives schema and table information
+-- MAGIC           desc extended table_name
+-- MAGIC
+-- MAGIC           gives staring data from the given path
+-- MAGIC           %fs head
+-- MAGIC           dbfs:/user/hive/warehouse/emp/_delta_log/0000000000000000,json
+-- MAGIC
+-- MAGIC   3.checkpoint
+-- MAGIC
+-- MAGIC       one checkpoint parquet file on delta logs:- it will create a checkpoint after every 9-10 tramscations automatically but not fixed. sometimes 7/11. it depends on trnascations
+-- MAGIC       1 checkpoint :- contians results of all the above (9-10)jsons files. 
+-- MAGIC         combines all the above jsons and store it in a checkpoint
+-- MAGIC         this checkpoint is in parquet format
+-- MAGIC
+-- MAGIC
+-- MAGIC
+-- MAGIC
+-- MAGIC   For every transcation(create/insert/delete any operation) one json and crc file create 
+-- MAGIC  
+-- MAGIC   
+-- MAGIC
+-- MAGIC     For example:
+-- MAGIC     1.create table empn(id int, name string, dep string);  ----> 0 parquet file with 1 json and 1 crc file
+-- MAGIC     2.insert into table_name values(1,'Naval','Solapur'); ---> 1 parquet file create with 1 record in the file with 1 json and 1 crc 
+-- MAGIC     3.insert into table_name values(2,'Gaurav','Mumbai'),(3,'karan','pune')(4,'Sristi','Mumbai'); ---> 1 parquet file create with 3 record in the file with 1 json and 1 crc 
+-- MAGIC     4.insert into table_name values(5,'Himanshu','Mumbai'); ---> 1 parquet file create with 1 record in the file with 1 json and 1 crc 
+-- MAGIC     5.insert into table_name values(6,'Swapnil','Pune'); ---> 1 parquet file create with 1 record in the file with 1 json and 1 crc 
+-- MAGIC
+-- MAGIC     total :- 4 parquet files 5 json and 5 crc files
+-- MAGIC
+-- MAGIC     6.delete from table_name where id = 1;  ----->  1 json and 1 crc will file be created since it is a new transcation. But  it wont delete parquert file since we need time travel is used in delta(but it has validty) so it wont delete it just it wont use it keeps in stale.
+-- MAGIC
+-- MAGIC     7.delete from table_name where id = 2;  -----> 1 json and 1 crc will file be created since it is a new transcation. But for the multiple records inserted in a single insert ddl in a single parquet file then this delete operation case this will create new parquet file. since parquet is immutable it cant be modified so it will use the remaining records in new parquest file and the previous one is in stale wont use in the query. same applies for update ddl
+-- MAGIC
+-- MAGIC     total :- 5 parquet files (but 3 are in use other 2 are in stale(unused) for certian time) and 7 json and 7 crc files and 4 records.
+-- MAGIC
+-- MAGIC     Time travel(version control)
+-- MAGIC     If we query the table now we will get only 4 records but if we need to know old records then we have to use the beow sytax    
+-- MAGIC       1. version as of
+-- MAGIC       select * from table_name version as of 4;
+-- MAGIC           we can create new table from the abve query result also 
+-- MAGIC             create table new_table_name as select * from table_name version as of 4;
+-- MAGIC
+-- MAGIC       2. timestamp as of
+-- MAGIC       select * from table_name timestamp as of '2025-06-07T06:56:53.000+00:00';
+-- MAGIC
+-- MAGIC       version and timestamp details can be get from the below command
+-- MAGIC       desc history table_name;
+-- MAGIC
+-- MAGIC     Schema evolution
+-- MAGIC       if we keep on inserting records after some time if we insert one more column then aut
+-- MAGIC
+-- MAGIC       data = ([(1,'Naval','Pune'),(2,'Karan','Mumbai')])
+-- MAGIC       schema = 'id int, name string, city string'
+-- MAGIC
+-- MAGIC       df = spark.createDataFrame(data,schema)
+-- MAGIC
+-- MAGIC       df.write.saveAsTable("emp_new")
+-- MAGIC
+-- MAGIC       desc detial emp_new; ---> will give 2 parition files since df is a disttubuted in 2 cores we are getting 2 parquet files
+-- MAGIC
+-- MAGIC
+-- MAGIC     so after some run if we are adding extra column and extra data and writing back to the same table it will fail coz of schema is different 
+-- MAGIC
+-- MAGIC       data = ([(3,'Akshay','Pune','DE'),(4,'Aman','Mumbai','DA')])
+-- MAGIC       schema = 'id int, name string, city string, dept string'
+-- MAGIC
+-- MAGIC       df = spark.createDataFrame(data,schema)
+-- MAGIC
+-- MAGIC       df.write.mode('append').saveAsTable("emp_new")
+-- MAGIC
+-- MAGIC
+-- MAGIC     in delta if we enable mergeSchema opton then this schema will evolved and the first records will be null for the new column
+-- MAGIC       df.write.mode('append').option("mergeSchema","true").saveAsTable("emp_new")
+-- MAGIC
+-- MAGIC
+-- MAGIC
+-- MAGIC   But cost wil be more so we need to optimize 
+-- MAGIC   delta lake optimization
+-- MAGIC   
+-- MAGIC   1.query optimization
+-- MAGIC     a single parquet file can have minimum default file size i.e 1 gb. But can be altered
+-- MAGIC     if we are exceeding then it will create another file with remaining size 
+-- MAGIC     if we have many transcations then we will end up with more number of parquet and json files this will effect the query performances
+-- MAGIC
+-- MAGIC     this will lead large number of small/tiny problems
+-- MAGIC
+-- MAGIC
+-- MAGIC   to overcome this or increase query performances we are running below command 
+-- MAGIC     i.e optimize table_name
+-- MAGIC     optimize :- combines all small/tiny files to one large new file (upto 1 gb). old parquet files will be in unused/stale
+-- MAGIC     optimize is also transcation so it will create 1 json and 1 crc file
+-- MAGIC
+-- MAGIC   2.cost optimization
+-- MAGIC     but still with the old files new files will be creating so cost will be more. only smooe files will be used and some are in stale/unused for time travel option
+-- MAGIC
+-- MAGIC     so in order to save cost we have to remove unused/stale files. we running a command below but no time travel option will be there. 
+-- MAGIC     i.e :- vaccum table_name
+-- MAGIC 	
+-- MAGIC 	but it has retention period upto 7 days. so after 7 days this will effect removing stale files and no time travel
+-- MAGIC 	But if we want to do it immediately we have to use below cmd
+-- MAGIC 	
+-- MAGIC 	SET saprk.databricks.delta.retentionDurationCheck.enabled = false
+-- MAGIC 	
+-- MAGIC 	i.e.. vaccum table_name retain 0 hours
+-- MAGIC
+-- MAGIC
+-- MAGIC     
+-- MAGIC
+-- MAGIC
+-- MAGIC
+-- MAGIC
+-- MAGIC
+-- MAGIC     
